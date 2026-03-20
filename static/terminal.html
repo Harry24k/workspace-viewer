@@ -552,7 +552,8 @@
         });
 
         // Load terminal list
-        async function loadTerminals() {
+        let lastTerminalListJson = '';
+        async function loadTerminals(force) {
             try {
                 const res = await fetch(JUPYTER + '/api/terminals');
                 if (!res.ok) throw new Error('Failed');
@@ -564,6 +565,10 @@
                     activeNames.add(t.name);
                 });
                 cleanLocalNames(activeNames);
+                // Skip DOM rebuild if the terminal list hasn't changed (avoids layout reflow that causes scroll jump)
+                const listJson = JSON.stringify(data.map(t => t.name).sort());
+                if (!force && listJson === lastTerminalListJson) return;
+                lastTerminalListJson = listJson;
                 renderList(data);
             } catch (e) {
                 termList.innerHTML = '<div class="term-empty">Error loading terminals</div>';
@@ -664,7 +669,7 @@
                 currentDisplayName = displayName;
                 termTitle.textContent = displayName;
             }
-            await loadTerminals();
+            await loadTerminals(true);
         }
 
         function timeAgo(isoStr) {
@@ -693,7 +698,7 @@
                 });
                 if (!res.ok) throw new Error('Failed to create');
                 const data = await res.json();
-                await loadTerminals();
+                await loadTerminals(true);
                 connectTerminal(data.name);
                 closeSidebar();
             } catch (e) {
@@ -719,7 +724,7 @@
                     termInputBar.classList.add('hidden');
                     scrollbar.classList.remove('active');
                 }
-                await loadTerminals();
+                await loadTerminals(true);
             } catch (e) {
                 alert('Failed to delete terminal');
             }
@@ -776,6 +781,8 @@
 
             setTimeout(() => {
                 fitAddon.fit();
+                const proposed = fitAddon.proposeDimensions();
+                if (proposed) { lastCols = proposed.cols; lastRows = proposed.rows; }
                 // Hook scroll for custom scrollbar
                 const viewport = terminalContainer.querySelector('.xterm-viewport');
                 if (viewport) viewport.addEventListener('scroll', updateScrollbar);
@@ -820,17 +827,33 @@
                 }
             });
 
-            // Handle resize
+            // Handle resize (debounced to avoid scroll-jump on layout reflows)
+            let resizeTimer = null;
+            let lastCols = 0;
+            let lastRows = 0;
             const resizeObserver = new ResizeObserver(() => {
-                if (fitAddon && currentTerm) {
+                if (!fitAddon || !currentTerm) return;
+                if (resizeTimer) clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(() => {
+                    resizeTimer = null;
+                    if (!fitAddon || !currentTerm) return;
+                    const proposed = fitAddon.proposeDimensions();
+                    if (!proposed) return;
+                    // Only refit if dimensions actually changed
+                    if (proposed.cols === lastCols && proposed.rows === lastRows) return;
+                    const viewport = terminalContainer.querySelector('.xterm-viewport');
+                    const savedScrollTop = viewport ? viewport.scrollTop : null;
                     fitAddon.fit();
-                    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
-                        const dims = fitAddon.proposeDimensions();
-                        if (dims) {
-                            currentWs.send(JSON.stringify(["set_size", dims.rows, dims.cols]));
-                        }
+                    lastCols = proposed.cols;
+                    lastRows = proposed.rows;
+                    // Restore scroll position after fit
+                    if (viewport && savedScrollTop !== null) {
+                        viewport.scrollTop = savedScrollTop;
                     }
-                }
+                    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+                        currentWs.send(JSON.stringify(["set_size", proposed.rows, proposed.cols]));
+                    }
+                }, 100);
             });
             resizeObserver.observe(terminalContainer);
         }
@@ -986,8 +1009,8 @@
         setInterval(updateScrollbar, 200);
 
         // Init
-        loadTerminals();
-        setInterval(loadTerminals, 10000);
+        loadTerminals(true);
+        setInterval(() => loadTerminals(false), 10000);
     })();
     </script>
 </body>
